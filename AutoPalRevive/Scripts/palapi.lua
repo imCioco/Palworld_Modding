@@ -1,28 +1,6 @@
--- palapi.lua -- everything that knows about Palworld's own classes.
---
--- Names used here were read out of Palworld-Win64-Shipping.exe's reflection
--- data (UObject property + UFunction name tables), so they match this build
--- rather than the 0.1.x-era names older revive mods used. Every access is
--- still probed at runtime and falls back, because a patch can rename things.
---
---   UPalIndividualCharacterParameter
---      PhysicalHealth              EPalStatusPhysicalHealthType (HEALTH below)
---      PalReviveTimer              float, in FPalIndividualCharacterSaveParameter
---      PalReviveSpeedMultiplier    float, on the parameter object itself
---      GetPhysicalHealth / SetPhysicalHealth / FullRecoveryHP
---      GetHP / GetMaxHP / GetLevel / GetNickname / SaveParameter
---   UPalOtomoHolderComponentBase
---      GetAllIndividualHandle / GetOtomoCount / GetOtomoIndividualHandle
---   UPalIndividualCharacterHandle
---      TryGetIndividualParameter / GetIndividualID
---   UPalGameSetting
---      PalBoxReviveTime            float, MINUTES
-
 local U = require "util"
 
 local P = {}
-
--- EPalStatusPhysicalHealthType, in declaration order.
 P.HEALTH = {
     Healthful     = 0,
     MinorInjury   = 1,
@@ -41,10 +19,6 @@ P.HEALTH_NAME = {
     [5] = "CloudCemetery",
 }
 
---==========================================================================
--- world handles
---==========================================================================
-
 function P.palUtility()
     local o = U.global("StaticFindObject", "/Script/Pal.Default__PalUtility")
     if U.valid(o) then return o end
@@ -56,16 +30,12 @@ function P.uiUtility()
     if U.valid(o) then return o end
     return nil
 end
-
---==========================================================================
--- text
---==========================================================================
-
--- UE4SS exposes FText read-only, but the engine's own Kismet library will
--- build one for us, so UI text this mod wants to replace can be produced at
--- runtime after all.
+local textLibrary = nil
 function P.makeText(str)
-    local ktl = U.global("StaticFindObject", "/Script/Engine.Default__KismetTextLibrary")
+    if not U.valid(textLibrary) then
+        textLibrary = U.global("StaticFindObject", "/Script/Engine.Default__KismetTextLibrary")
+    end
+    local ktl = textLibrary
     if not U.valid(ktl) then return nil end
 
     for _, fn in ipairs({ "Conv_StringToText", "MakeLiteralText" }) do
@@ -74,14 +44,6 @@ function P.makeText(str)
     end
     return nil
 end
-
---==========================================================================
--- EPalUIConditionType
---==========================================================================
-
--- Declaration order read out of the binary. Confirmed against the live UEnum
--- when that can be read, because an off-by-one here would rename the wrong
--- condition in the player's UI.
 local UI_CONDITION_FALLBACK = {
     None = 0, Happy = 1, Unhappy = 2, MinorInjury = 3, Severe = 4,
     Dying = 5, Hunger = 6, Starvation = 7, Cold = 8, Sprain = 9,
@@ -145,12 +107,6 @@ end
 function P.inWorld()
     return P.playerController() ~= nil
 end
-
---==========================================================================
--- ids
---==========================================================================
-
--- FGuid -> stable string, or "0" for an all-zero guid (= not player owned).
 function P.guidKey(g)
     g = U.unwrap(g)
     if g == nil then return nil end
@@ -165,8 +121,6 @@ function P.guidKey(g)
     if na == 0 and nb == 0 and nc == 0 and nd == 0 then return "0" end
     return string.format("%.0f-%.0f-%.0f-%.0f", na, nb, nc, nd)
 end
-
--- FPalInstanceID { PlayerUId, InstanceId } -> stable string key
 function P.individualKey(param)
     local id = U.unwrap(U.get(param, "IndividualId") or U.callv(param, "GetIndividualID"))
     if id ~= nil then
@@ -198,10 +152,6 @@ function P.localPlayerUid()
     return nil
 end
 
---==========================================================================
--- party (otomo) enumeration
---==========================================================================
-
 function P.otomoHolder()
     local util = P.palUtility()
     if U.valid(util) then
@@ -212,8 +162,6 @@ function P.otomoHolder()
             end
         end
     end
-
-    -- Only accept a holder whose owner is this local controller or pawn.
     local pc, pawn = P.playerController(), P.playerPawn()
     local function same(a, b)
         if not (U.valid(a) and U.valid(b)) then return false end
@@ -229,9 +177,6 @@ function P.otomoHolder()
     end)
     return found
 end
-
--- Returns keys (map individualKey -> true), params (array) and a boolean
--- saying whether the party could be read at all.
 function P.partyKeys()
     local keys, params = {}, {}
 
@@ -252,9 +197,6 @@ function P.partyKeys()
 
     local list = U.callv(holder, "GetAllIndividualHandle")
     U.each(list, take)
-
-    -- Always inspect every slot, including holes and unloaded/unsummoned Pals.
-    -- GetOtomoCount is occupied count, not necessarily the highest slot index.
     local count = U.num(U.callv(holder, "GetMaxOtomoNum"), nil)
     local slotsReadable = count ~= nil and count >= 0
     if slotsReadable then
@@ -265,14 +207,6 @@ function P.partyKeys()
 
     return keys, params, slotsReadable or list ~= nil
 end
-
---==========================================================================
--- reading a Pal's state
---==========================================================================
-
--- FPalIndividualCharacterSaveParameter holds PhysicalHealth, PalReviveTimer
--- and the rest. Which property exposes the struct can differ between builds,
--- so probe once and remember the route that worked.
 local saveRoute = nil
 local SAVE_ROUTES = { "SaveParameter", "SaveParameterMirror", "RawSaveParameter" }
 
@@ -298,15 +232,6 @@ function P.timerRouteName()
     return saveRoute
 end
 
--- Two flavours of every read.
---
--- The *Fast versions go straight at the save struct, skipping ProcessEvent,
--- and are only used as a cheap pre-filter over every loaded Pal. The plain
--- versions call the game's own accessors and are what any decision is made
--- on, because a struct field can read wrong or be missing on a given build
--- and a Pal that is quietly never seen as down is the worst failure mode
--- this mod has.
-
 function P.physicalHealthFast(param)
     local s = saveParam(param)
     if s ~= nil then
@@ -323,8 +248,6 @@ function P.physicalHealth(param)
     if v ~= nil then return v end
     return P.physicalHealthFast(param)
 end
-
--- hp, maxhp. Values may be fixed-point; only their sign and zero-ness matter.
 function P.hpFast(param)
     local s = saveParam(param)
     if s ~= nil then
@@ -343,12 +266,6 @@ function P.hp(param)
     local fhp, fmax = P.hpFast(param)
     return hp or fhp, maxhp or fmax
 end
-
--- Are the cheap struct reads telling the same story as the game's own
--- accessors on this build? Checked against real Pals rather than assumed,
--- and one disagreement retires the fast path for the rest of the session.
--- HP is compared on zero-ness only, because the struct holds fixed-point
--- and the accessor may not.
 local fastOk = nil
 
 function P.probeFastReads(param)
@@ -358,7 +275,7 @@ function P.probeFastReads(param)
     local trueHp     = U.num(U.callv(param, "GetHP"), nil)
     local trueMax    = U.num(U.callv(param, "GetMaxHP"), nil)
     if trueHealth == nil or trueHp == nil or trueMax == nil then
-        return fastOk -- cannot judge from this Pal; leave the verdict alone
+        return fastOk -- Insufficient data for this Pal.
     end
 
     local fastHealth = P.physicalHealthFast(param)
@@ -410,10 +327,6 @@ function P.label(info)
     return name
 end
 
---==========================================================================
--- the game's own revive fields
---==========================================================================
-
 function P.getReviveTimer(param)
     local s = saveParam(param)
     if s ~= nil then
@@ -436,23 +349,6 @@ end
 function P.setReviveSpeed(param, value)
     return (U.set(param, "PalReviveSpeedMultiplier", value))
 end
-
---==========================================================================
--- UI feedback
---==========================================================================
---
--- The Palbox draws its green "recovering" overlay and countdown from three
--- things on the parameter: the physical-health state, PalReviveTimer, and
--- PalReviveSpeedMultiplier. The widget refreshes when the parameter fires
--- OnUpdateReviveTimerDelegate(NowReviveTimer, ReviveSpeedMultiplier).
---
--- PalReviveTimer is a raw counter, and UPalUIUtility turns it into the
--- number on screen via ConvertReviveTimerToUIDisplayRemainReviveTime. Rather
--- than guess whether the raw counter runs up or down, probe that function
--- once at runtime and write whichever polarity makes the UI show the truth.
-
--- ConvertReviveTimerToUIDisplayRemainReviveTime(WorldContextObject,
---     ReviveTimer, ReviveSpeedMultiplier) -> float
 local polarity = nil -- "elapsed" | "remaining" | nil while unresolved
 
 function P.timerPolarity()
@@ -466,7 +362,7 @@ function P.timerPolarity()
     local low  = U.num(U.callv(ui, fn, ctx, 0.0,   1.0), nil)
     local high = U.num(U.callv(ui, fn, ctx, 120.0, 1.0), nil)
     if low == nil or high == nil or math.abs(high - low) < 0.0001 then
-        return nil -- no verdict yet; ask again next tick rather than guess
+        return nil -- Retry the probe next tick.
     end
 
     polarity = (high < low) and "elapsed" or "remaining"
@@ -478,10 +374,6 @@ local function broadcastReviveUpdate(param, value, speed)
     if delegate == nil then return false end
     return (pcall(function() delegate:Broadcast(value, speed) end))
 end
-
--- Keep the in-game countdown and the recovering overlay in sync with the
--- time this mod is actually going to wait. totalSeconds is the window the
--- UI itself works in (PalBoxReviveTime), not our per-scope timer.
 function P.showCountdown(param, remainingSeconds, totalSeconds)
     local speed = P.getReviveSpeed(param)
     if speed == nil or speed < 1.0 then
@@ -490,10 +382,6 @@ function P.showCountdown(param, remainingSeconds, totalSeconds)
     end
 
     if remainingSeconds < 0 then remainingSeconds = 0 end
-
-    -- Until the probe has a verdict, assume the stored value counts up: the
-    -- function is named "convert the timer INTO the remaining time", which
-    -- only makes sense if what is stored is elapsed.
     local value
     if (P.timerPolarity() or "elapsed") == "elapsed"
        and totalSeconds and totalSeconds > 0 then
@@ -512,14 +400,6 @@ function P.clearCountdown(param)
     P.setReviveTimer(param, 0.0)
     broadcastReviveUpdate(param, 0.0, P.getReviveSpeed(param) or 1.0)
 end
-
---==========================================================================
--- reviving
---==========================================================================
-
--- Last resort when FullRecoveryHP does not take: write MaxHP into HP in the
--- save struct. Both are the same fixed-point type, so copy the struct, and
--- fall back to copying its inner value field.
 local function forceFullHp(param)
     local s = saveParam(param)
     if s == nil then return false end
@@ -546,10 +426,7 @@ end
 local function healthName(v)
     return P.HEALTH_NAME[v] or tostring(v)
 end
-
--- Put the Pal back on its feet: clear the physical-health state, then top
--- the HP back up. FullRecoveryHP is the game's own full-heal entry point.
--- Returns ok, detail.
+-- Clear the health state before restoring HP.
 function P.revive(param)
     local before = P.physicalHealth(param)
     if before == P.HEALTH.CloudCemetery then return false, "hardcore-lost Pal" end
@@ -564,16 +441,12 @@ function P.revive(param)
     local hp, maxhp = P.hp(param)
 
     if hp ~= nil and hp <= 0 then
-        -- HP can stay clamped until the state change has landed.
         U.call(param, "FullRecoveryHP")
         hp, maxhp = P.hp(param)
     end
     if hp ~= nil and maxhp ~= nil and hp < maxhp then
-        -- A Pal sitting in its sphere does not always respond to the normal
-        -- heal path, so set the value ourselves. State first, then the
-        -- value: anything the state change recalculates would otherwise
-        -- land on top of the HP we just wrote.
         U.call(param, "SetPhysicalHealth", P.HEALTH.Healthful)
+        -- Unsummoned Pals may require a direct HP update.
         forceFullHp(param)
         hp, maxhp = P.hp(param)
     end
@@ -599,12 +472,7 @@ function P.revive(param)
     return true, string.format("%s -> Healthful, HP %s/%s",
         healthName(before), tostring(hp), tostring(maxhp))
 end
-
---==========================================================================
--- global game setting
---==========================================================================
-
--- PalGameSetting.PalBoxReviveTime is in MINUTES.
+-- PalBoxReviveTime is measured in minutes.
 function P.applyPalBoxReviveTime(minutes)
     local applied = 0
 

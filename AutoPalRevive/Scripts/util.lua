@@ -1,21 +1,11 @@
--- util.lua -- logging + defensive UObject access helpers.
--- Everything that touches the game goes through pcall: a renamed property
--- after a game patch should downgrade the mod, not crash Palworld.
-
 local U = {}
 
 U.PREFIX = "[AutoPalRevive] "
--- 1 = one line when a Pal goes down and when it gets up (default).
--- Raise to 2 or 3 here if you ever need to troubleshoot; it is not a
--- config.ini setting on purpose.
+-- Log levels: 1 = normal, 2 = verbose, 3 = debug.
 U.level  = 1
 
 local pack   = table.pack or function(...) return { n = select("#", ...), ... } end
 local unpack = table.unpack or unpack
-
---==========================================================================
--- logging
---==========================================================================
 
 function U.raw(msg)
     print(U.PREFIX .. tostring(msg) .. "\n")
@@ -38,12 +28,6 @@ function U.verbose(f, ...) U.logf(2, f, ...) end
 function U.debug(f, ...)   U.logf(3, f, ...) end
 function U.warn(f, ...)    U.raw("WARN  " .. fmt(f, ...)) end
 function U.err(f, ...)     U.raw("ERROR " .. fmt(f, ...)) end
-
---==========================================================================
--- object access
---==========================================================================
-
--- Global UE4SS function call that may not exist / may throw.
 function U.global(name, ...)
     local g = _G[name]
     if type(g) ~= "function" then return nil end
@@ -59,15 +43,11 @@ function U.valid(obj)
     if ok then return v == true end
     return false
 end
-
--- true when obj has a member (property or UFunction) with this name
 function U.has(obj, name)
     if obj == nil then return false end
     local ok, v = pcall(function() return obj[name] end)
     return ok and v ~= nil
 end
-
--- returns ok, result_or_error
 function U.call(obj, name, ...)
     if obj == nil then return false, "nil object" end
     local args = pack(...)
@@ -77,8 +57,6 @@ function U.call(obj, name, ...)
         return fn(obj, unpack(args, 1, args.n))
     end)
 end
-
--- returns result or nil
 function U.callv(obj, name, ...)
     local ok, res = U.call(obj, name, ...)
     if ok then return res end
@@ -96,21 +74,12 @@ function U.set(obj, name, value)
     if obj == nil then return false, "nil object" end
     return pcall(function() obj[name] = value end)
 end
-
--- Unwrap a UE4SS RemoteUnrealParam / struct wrapper if that is what we got.
 function U.unwrap(v)
     if v == nil then return nil end
     local ok, inner = pcall(function() return v:get() end)
     if ok and inner ~= nil then return inner end
     return v
 end
-
---==========================================================================
--- value coercion
---==========================================================================
-
--- Numbers, but also FFixedPoint64-style wrappers (Palworld stores HP as a
--- fixed-point struct) and RemoteUnrealParams.
 function U.num(v, default)
     if v == nil then return default end
     if type(v) == "number" then return v end
@@ -144,8 +113,6 @@ function U.bool(v, default)
     if n ~= nil then return n ~= 0 end
     return default
 end
-
--- FName / FString / FText / plain string
 function U.str(v, default)
     if v == nil then return default end
     if type(v) == "string" then return v end
@@ -157,13 +124,6 @@ function U.str(v, default)
     if ok then return s end
     return default
 end
-
---==========================================================================
--- arrays
---==========================================================================
-
--- Iterate a UE4SS TArray, a plain Lua table, or anything with GetArrayNum.
--- fn(element, index). Returns the number of elements visited.
 function U.each(arr, fn)
     if arr == nil then return 0 end
 
@@ -171,7 +131,6 @@ function U.each(arr, fn)
     local ok = pcall(function()
         arr:ForEach(function(index, element)
             count = count + 1
-            -- never let a caller error abort the iteration strategy probe
             pcall(fn, U.unwrap(element), index)
         end)
     end)
@@ -198,10 +157,6 @@ function U.each(arr, fn)
     return count
 end
 
---==========================================================================
--- misc
---==========================================================================
-
 function U.round(x)
     if x == nil then return nil end
     return math.floor(x + 0.5)
@@ -212,8 +167,6 @@ function U.clamp(x, lo, hi)
     if x > hi then return hi end
     return x
 end
-
--- "4m 12s"
 function U.duration(seconds)
     if seconds == nil then return "?" end
     if seconds < 0 then seconds = 0 end

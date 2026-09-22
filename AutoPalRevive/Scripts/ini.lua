@@ -1,7 +1,3 @@
--- ini.lua -- a small, forgiving INI reader.
--- Section and key lookups are case-insensitive; unknown keys fall back to
--- the default passed in by the caller, so a partial config.ini still works.
-
 local Ini = {}
 
 local function trim(s)
@@ -18,7 +14,6 @@ function Ini.parse(text)
         local first = line:sub(1, 1)
 
         if line == "" or first == ";" or first == "#" then
-            -- comment / blank
 
         else
             local name = line:match("^%[%s*([^%]]-)%s*%]$")
@@ -80,8 +75,6 @@ function Ini.bool(data, section, key, default)
     if FALSE[v] then return false end
     return default
 end
-
--- one of a fixed set of words, else default
 function Ini.enum(data, section, key, allowed, default)
     local v = raw(data, section, key)
     if v == nil then return default end
